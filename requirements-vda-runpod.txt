@@ -1,0 +1,14 @@
+einops
+imageio
+imageio-ffmpeg
+matplotlib
+numpy
+opencv-python-headless
+pillow
+scipy
+tqdm
+transformers
+
+# VDA's DINOv2 backbone calls xformers.ops.memory_efficient_attention on Blackwell.
+xformers==0.0.33
+triton

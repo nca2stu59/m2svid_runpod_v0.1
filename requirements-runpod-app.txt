@@ -1,0 +1,14 @@
+gradio==6.9.0
+ffmpeg-python==0.2.0
+imageio==2.37.2
+imageio-ffmpeg
+opencv-python-headless
+numpy
+pillow
+tqdm
+pynvml
+transnetv2-pytorch
+open-clip-torch
+transformers
+sentencepiece
+scikit-image

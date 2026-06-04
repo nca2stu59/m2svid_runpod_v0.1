@@ -1,0 +1,31 @@
+accelerate
+av
+decord
+diffusers
+einops
+ffmpeg-python==0.2.0
+ftfy
+kornia==0.6.9
+numpy
+omegaconf==2.3.0
+open-clip-torch==2.29.0
+opencv-python-headless
+pandas
+pillow
+piqa==1.3.2
+pytorch-lightning==1.5.0
+pytorch-msssim==1.0.0
+scikit-image
+scipy
+safetensors
+timm
+tokenizers
+tqdm
+transformers
+webdataset
+
+# GPU attention stack (Linux cu128 wheels)
+# xformers 0.0.33 ships Blackwell sm_120 kernels (cutlass fmha Op). Pairs with torch 2.9.x.
+# triton: installed by torch dep on Linux; pin here as defense.
+xformers==0.0.33
+triton

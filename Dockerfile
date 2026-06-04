@@ -1,0 +1,29 @@
+# RunPod stable base: torch 2.8 + py3.11 + cu128 + cudnn-devel + ubuntu 22.04.
+# prepare_env.sh upgrades torch to 2.9.0+cu128 inside the venv (host torch left alone).
+# Override BASE_IMAGE for py3.12 dev image or custom.
+ARG BASE_IMAGE=runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONUTF8=1 \
+    M2SVID_SERVICE_ROOT=/workspace/m2svid_service \
+    M2SVID_OUTPUT_ROOT=/workspace/outputs/m2svid_runpod_v0.1 \
+    GRADIO_SERVER_NAME=0.0.0.0 \
+    GRADIO_SERVER_PORT=7864 \
+    PORT=7864 \
+    GRADIO_CONCURRENCY=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git git-lfs ffmpeg curl ca-certificates \
+    libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/m2svid_runpod_v0.1
+COPY . /opt/m2svid_runpod_v0.1
+
+RUN chmod +x /opt/m2svid_runpod_v0.1/runpod_entrypoint.sh \
+    /opt/m2svid_runpod_v0.1/scripts/runpod_prepare_env.sh
+
+EXPOSE 7864
+CMD ["/opt/m2svid_runpod_v0.1/runpod_entrypoint.sh"]
