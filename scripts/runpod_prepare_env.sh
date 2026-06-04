@@ -77,7 +77,16 @@ if [[ "${INSTALL_DEPTHCRAFTER}" == "1" ]]; then
   warn "DepthCrafter requirements not bundled in this repo — install from upstream m2svid_service."
 fi
 
-# ---- step 3: third_party repos ---------------------------------------------
+# ---- step 3: m2svid_service vendored source (Hi3D + bidavideo + RAFT + ...) -
+# Pinned upstream repos (vendored in m2svid_service):
+#   Hi3D-Official, bidavideo, RAFT, pytorch-msssim, mamba — NOT in github clone list.
+# External repos (still cloned from upstream):
+#   DepthCrafter   github.com/Tencent/DepthCrafter         v1.0.1  fc83d365
+#   Video-Depth-Anything  github.com/DepthAnything/...     4f5ae231
+#   AutoShot       github.com/wentaozhu/AutoShot           77c82ff8
+#   FlashDepth     github.com/Eyeline-Labs/FlashDepth      3e08f313  (INSTALL_FLASHDEPTH=1)
+M2SVID_SERVICE_REPO="${M2SVID_SERVICE_REPO:-https://github.com/nca2stu59/m2svid_service.git}"
+
 clone_repo() {
   local url="$1"
   local dest="$2"
@@ -94,16 +103,55 @@ clone_repo() {
   fi
 }
 
+clone_m2svid_service() {
+  if [[ -f "${SERVICE_ROOT}/configs/m2svid.yaml" ]]; then
+    log "m2svid_service vendored source already present"
+    return
+  fi
+  if [[ -d "${SERVICE_ROOT}/.git" ]]; then
+    log "m2svid_service .git exists, pull"
+    (cd "${SERVICE_ROOT}" && git pull --ff-only)
+    return
+  fi
+  # Source missing but dir may already hold venvs/ckpts from previous partial run.
+  # Clone to temp, overlay code into service root (preserve .venv*/ckpts/outputs).
+  local tmp
+  tmp="$(mktemp -d)"
+  log "clone m2svid_service to ${tmp}/src"
+  git clone "${M2SVID_SERVICE_REPO}" "${tmp}/src"
+  log "overlay code -> ${SERVICE_ROOT} (preserve .venv*, ckpts/, outputs/)"
+  if ! command -v rsync >/dev/null 2>&1; then
+    apt-get install -y rsync
+  fi
+  rsync -a \
+    --exclude='.venv' --exclude='.venv-*' --exclude='.venv.bak' --exclude='.venv-*.bak' \
+    --exclude='ckpts/' --exclude='outputs/' --exclude='runs/' --exclude='temp/' --exclude='work/' \
+    "${tmp}/src/" "${SERVICE_ROOT}/"
+  rm -rf "${tmp}"
+}
+
 if [[ "${SKIP_THIRD_PARTY}" != "1" ]]; then
-  log "=== step 3: clone third_party repos ==="
-  clone_repo "https://github.com/Tencent/Hi3D-Official.git" \
-    "${SERVICE_ROOT}/third_party/Hi3D-Official"
+  log "=== step 3: m2svid_service source + external third_party ==="
+  clone_m2svid_service
+
+  # External repos (NOT vendored)
   clone_repo "https://github.com/DepthAnything/Video-Depth-Anything.git" \
-    "${SERVICE_ROOT}/third_party/Video-Depth-Anything"
-  clone_repo "https://github.com/jorge-pessoa/pytorch-msssim.git" \
-    "${SERVICE_ROOT}/third_party/pytorch-msssim"
-  clone_repo "https://github.com/wentaoyuan/AutoShot.git" \
-    "${SERVICE_ROOT}/third_party/AutoShot"
+    "${SERVICE_ROOT}/third_party/Video-Depth-Anything" \
+    "4f5ae23172ba60fd7bc11ef671cca678842c7072"
+  clone_repo "https://github.com/wentaozhu/AutoShot.git" \
+    "${SERVICE_ROOT}/third_party/AutoShot" \
+    "77c82ff826a9301bb173d9be786297a49d73d081"
+
+  if [[ "${INSTALL_DEPTHCRAFTER}" == "1" ]]; then
+    clone_repo "https://github.com/Tencent/DepthCrafter.git" \
+      "${SERVICE_ROOT}/third_party/DepthCrafter_new" \
+      "fc83d365f2b781ab05aeb94b13f7e97417df7d97"
+  fi
+  if [[ "${INSTALL_FLASHDEPTH}" == "1" ]]; then
+    clone_repo "https://github.com/Eyeline-Labs/FlashDepth.git" \
+      "${SERVICE_ROOT}/third_party/FlashDepth" \
+      "3e08f313b9f1b08efde5e6ebacc671a173cb9f36"
+  fi
 else
   log "SKIP_THIRD_PARTY=1 — skipping clones"
 fi
