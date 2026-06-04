@@ -224,20 +224,21 @@ deploy_shim_to_venv() {
 }
 
 case "${INSTALL_BLACKWELL_SHIM}" in
-  1)    SHIM_ACTIVE=1 ;;
-  0)    SHIM_ACTIVE=0 ;;
-  auto) if detect_blackwell; then SHIM_ACTIVE=1; else SHIM_ACTIVE=0; fi ;;
-  *)    err "INSTALL_BLACKWELL_SHIM must be auto|0|1"; exit 1 ;;
+  1|auto) SHIM_ACTIVE=1 ;;
+  0)      SHIM_ACTIVE=0 ;;
+  *)      err "INSTALL_BLACKWELL_SHIM must be auto|0|1"; exit 1 ;;
 esac
 
 if [[ "${SHIM_ACTIVE}" == "1" ]]; then
-  log "=== step 5: deploy Blackwell shim (sm_120 detected or forced) ==="
+  log "=== step 5: deploy SDPA shim (runtime decides activation) ==="
+  log "  shim auto-detects xformers C++ extension breakage (cu130/cp310 vs cu128/cp311 ABI)"
+  log "  + sm_120 Blackwell missing kernels. On healthy xformers it's no-op."
   deploy_shim_to_venv "${SERVICE_ROOT}/.venv"
   deploy_shim_to_venv "${SERVICE_ROOT}/.venv-vda"
   [[ -d "${SERVICE_ROOT}/.venv-flashdepth" ]] && deploy_shim_to_venv "${SERVICE_ROOT}/.venv-flashdepth"
   [[ -d "${SERVICE_ROOT}/.venv-depthcrafter" ]] && deploy_shim_to_venv "${SERVICE_ROOT}/.venv-depthcrafter"
 else
-  log "Blackwell shim skipped (non-sm_120 GPU or explicitly disabled)"
+  log "SDPA shim deploy disabled (INSTALL_BLACKWELL_SHIM=0)"
 fi
 
 # ---- step 6: verify ---------------------------------------------------------

@@ -1,10 +1,19 @@
-"""Monkey-patch xformers.memory_efficient_attention to use torch SDPA on Blackwell.
+"""Monkey-patch xformers.memory_efficient_attention to use torch SDPA.
 
-Defensive shim for sm_120 (RTX 5090 / Pro 6000 Blackwell / B100/B200).
-On Linux + xformers 0.0.33, native cutlass-blackwell kernel is usually
-available — this shim is then a benign override (perf parity via cuDNN SDPA).
+Activation criteria (any of):
+  1. SM 12.x (Blackwell — sm_120 RTX 5090 / Pro 6000 / B100/B200) — xformers
+     prebuilt wheels lack Blackwell cutlass kernels.
+  2. xformers C++ extension fails to load (ABI mismatch — cu130 vs cu128,
+     cp310 vs cp311, torch 2.10 vs 2.9, etc.). Common on RunPod Linux pods
+     because PyPI xformers 0.0.33 ships cu130/cp310 bytes but advertises
+     wider compat.
+  3. Live attention call raises (any reason).
 
-On non-Blackwell GPUs (sm_90 / sm_80 / etc.) shim is a no-op (capability check).
+If xformers loads + runs an attention call cleanly, shim is a no-op.
+
+PyTorch SDPA + cuDNN flash-attn supports sm_80+ (A100/H100/H200) and
+sm_120 (Blackwell) and gives parity-or-better perf for SVD-class video
+diffusion. xformers fallback path is uniformly equivalent or slower.
 
 Handles BOTH tensor layouts xformers accepts:
   3D (B, M, D)        — SGM / Hi3D-Official pre-merge heads into batch
@@ -17,7 +26,23 @@ Origin: m2svid_service Windows migration (port/buildlog/2026-05-10_m2svid_cu128_
 """
 from __future__ import annotations
 
+import os
 import sys
+
+
+def _xformers_works() -> bool:
+    """Smoke-test xformers C++ extension + a tiny attention call."""
+    try:
+        import torch
+        from xformers.ops import memory_efficient_attention as _mea
+        # Trigger the C++ extension. If it's broken the warning fires here.
+        if not torch.cuda.is_available():
+            return False
+        q = torch.zeros(1, 8, 4, 32, device="cuda", dtype=torch.float16)
+        _mea(q, q, q)
+        return True
+    except Exception:
+        return False
 
 
 def _install() -> None:
@@ -27,12 +52,24 @@ def _install() -> None:
         return
     if not torch.cuda.is_available():
         return
+
+    force = os.environ.get("BLACKWELL_SHIM_FORCE", "").lower() in ("1", "yes", "true", "on")
+    disable = os.environ.get("BLACKWELL_SHIM_DISABLE", "").lower() in ("1", "yes", "true", "on")
+    if disable:
+        return
+
+    is_blackwell = False
     try:
         cap = torch.cuda.get_device_capability(0)
+        is_blackwell = cap[0] >= 12
     except Exception:
-        return
-    if cap[0] < 12:
-        return  # not Blackwell, leave xformers alone
+        pass
+
+    # Decide whether to patch.
+    if not force and not is_blackwell:
+        # Non-Blackwell: patch only if xformers is actually broken.
+        if _xformers_works():
+            return
 
     try:
         import xformers.ops as _xops
