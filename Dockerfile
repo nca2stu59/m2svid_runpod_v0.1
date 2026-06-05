@@ -3,17 +3,21 @@
 # Override BASE_IMAGE for py3.12 dev image or custom.
 ARG BASE_IMAGE=runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
 
-# ─── Stage 1: flash-attn 2 source build (sm_120 + cu128 + torch 2.9 + cp311) ───
+# ─── Stage 1: flash-attn 2 source build (cu128 + torch 2.9 + cp311) ───
 # Built once at image-build time, wheel copied to final stage.
-# Build settings: TORCH_CUDA_ARCH_LIST=12.0 (Blackwell), FA2 ≥2.7.x supports sm_120.
+# Default build target is H200/H100 (sm_90). Override args for Pro 6000:
+#   --build-arg FA2_TORCH_CUDA_ARCH_LIST=12.0 --build-arg FA2_FLASH_ATTN_CUDA_ARCHS=120
 # MAX_JOBS=2 to avoid OOM during nvcc concurrent compile (~80GB RAM usage at 4 jobs).
 FROM ${BASE_IMAGE} AS fa2-builder
+
+ARG FA2_TORCH_CUDA_ARCH_LIST=9.0
+ARG FA2_FLASH_ATTN_CUDA_ARCHS=90
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_ROOT_USER_ACTION=ignore \
-    TORCH_CUDA_ARCH_LIST="12.0" \
-    FLASH_ATTN_CUDA_ARCHS="120" \
+    TORCH_CUDA_ARCH_LIST="${FA2_TORCH_CUDA_ARCH_LIST}" \
+    FLASH_ATTN_CUDA_ARCHS="${FA2_FLASH_ATTN_CUDA_ARCHS}" \
     MAX_JOBS=2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

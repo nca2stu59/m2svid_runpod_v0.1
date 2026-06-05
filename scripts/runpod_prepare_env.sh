@@ -23,6 +23,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${APP_DIR:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+
+if [[ -n "${PROFILE:-}" && -f "${PROFILE}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${PROFILE}"
+  set +a
+fi
+
 SERVICE_ROOT="${M2SVID_SERVICE_ROOT:-/workspace/m2svid_service}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"

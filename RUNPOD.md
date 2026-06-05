@@ -32,7 +32,7 @@ third_party/AutoShot                 (auto-clone)
 |---|---|
 | Base image | `runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04` (stable). `prepare_env.sh` upgrades venv torch → 2.9.0+cu128. |
 | Container disk | 50 GB (code + venvs ≈ 15 GB) |
-| Volume | 30 GB persistent (ckpts ≈ 14 GB + working files) |
+| Volume | 50 GB persistent (current baseline; ckpts/cache/outputs). Use 100 GB+ for repeated max-res tests. |
 | GPU | H200 141GB recommended ($4.39/hr Community). RTX Pro 6000 Blackwell 96GB ($2.09/hr) also supported — Blackwell shim auto-deploys. |
 | HTTP ports | 7864/http |
 | TCP ports | 7864/tcp (RECOMMENDED — avoids 100s Cloudflare cap) |
@@ -72,8 +72,11 @@ cd /workspace/m2svid_runpod_v0.1
 export GRADIO_AUTH="user:strong-password"      # mandatory unless ALLOW_NO_AUTH=1
 export M2SVID_SERVICE_ROOT=/workspace/m2svid_service
 export M2SVID_OUTPUT_ROOT=/workspace/outputs/m2svid_runpod_v0.1
-./runpod_entrypoint.sh
+bash scripts/runpod_h200_preflight.sh
+bash scripts/runpod_h200_launch_gradio.sh
 ```
+
+Do not run Gradio before `runpod_h200_preflight.sh` prints `PREFLIGHT_OK`.
 
 ## Reaching Gradio — TCP vs HTTP proxy
 
@@ -101,7 +104,7 @@ Works for short jobs. For long jobs ensure Gradio `.queue(default_concurrency_li
 
 | Component | $/month idle | $/job 1080p 30s video |
 |---|---|---|
-| 30 GB Network Volume | ~$2.1 | included |
+| 50 GB Network Volume | current baseline | included |
 | Pod H200 boot (~90s) | — | ~$0.11 |
 | Pod H200 1 hr inference | — | ~$4.39 |
 | Pod Pro 6000 1.5 hr inference (≈ H200 1 hr work) | — | ~$3.15 |
@@ -111,8 +114,26 @@ $500 credit ≈ 113 hr H200 or 239 hr Pro 6000 of compute. H200 wins on $/effect
 ## Build Docker image (optional)
 
 ```bash
+docker build -f Dockerfile.h200-safe -t <dockerhub-user>/m2svid-runpod:h200-safe .
+docker build -f Dockerfile.pro6000-safe -t <dockerhub-user>/m2svid-runpod:pro6000-safe .
 docker build -t <dockerhub-user>/m2svid-runpod:v0.1 .
 docker push <dockerhub-user>/m2svid-runpod:v0.1
+```
+
+Use `Dockerfile.h200-safe` for the first H200 validation pass. It skips the
+flash-attn source build and pins the runtime profile to sm90/H200-safe defaults.
+Use `Dockerfile.pro6000-safe` for the first RTX PRO 6000 validation pass. It
+skips the flash-attn source build, pins sm120 defaults, and forces the
+Blackwell xformers shim path.
+
+### Pro6000 launch variant
+
+```bash
+cd /workspace/m2svid_runpod_v0.1
+PROFILE=runpod_profiles/pro6000-safe.env bash scripts/runpod_prepare_env.sh
+bash scripts/runpod_pro6000_preflight.sh
+export GRADIO_AUTH="user:strong-password"
+bash scripts/runpod_pro6000_launch_gradio.sh
 ```
 
 In RunPod template editor:

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import traceback
@@ -42,9 +43,30 @@ except Exception:
 
 HERE = Path(__file__).resolve().parent
 PORT_ROOT = HERE.parent
-# 2026-05-10: Tier 1 consolidation — autoshot moved to GenStereoBackend/dependency/
-AUTOSHOT_DIR = PORT_ROOT / "GenStereoBackend" / "dependency" / "autoshot"
-DEFAULT_WEIGHTS = AUTOSHOT_DIR / "ckpt_0_200_0.pth"
+
+
+def _default_autoshot_dir() -> Path:
+    env = os.environ.get("AUTOSHOT_DIR")
+    if env:
+        return Path(env)
+    vendored = HERE / "vendored" / "autoshot"
+    if vendored.exists():
+        return vendored
+    return PORT_ROOT / "GenStereoBackend" / "dependency" / "autoshot"
+
+
+def _default_autoshot_weights() -> Path:
+    env = os.environ.get("AUTOSHOT_WEIGHTS")
+    if env:
+        return Path(env)
+    service = os.environ.get("M2SVID_SERVICE_ROOT") or os.environ.get("RUNPOD_M2SVID_SERVICE")
+    if service:
+        return Path(service) / "ckpts" / "autoshot.pth"
+    return AUTOSHOT_DIR / "ckpt_0_200_0.pth"
+
+
+AUTOSHOT_DIR = _default_autoshot_dir()
+DEFAULT_WEIGHTS = _default_autoshot_weights()
 
 
 def _emit(event: str, **kwargs):

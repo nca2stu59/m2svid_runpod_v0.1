@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -19,6 +20,13 @@ def status(label: str, path: Path, required: bool = True) -> str:
     return f"{mark} {label}: {path}"
 
 
+def bin_status(label: str, name: str) -> tuple[str, bool]:
+    found = shutil.which(name)
+    if found:
+        return f"OK {label}: {found}", True
+    return f"MISS {label}: {name}", False
+
+
 def main() -> int:
     service = DEFAULT_M2SVID_SERVICE
     default_output = (
@@ -31,13 +39,23 @@ def main() -> int:
         ("vda python", venv_python(service, ".venv-vda"), True),
         ("m2svid weights", service / "ckpts" / "m2svid_weights.pt", True),
         ("open_clip weights", service / "ckpts" / "open_clip_pytorch_model.bin", True),
+        ("autoshot weights", service / "ckpts" / "autoshot.pth", True),
         ("m2svid config", service / "configs" / "m2svid.yaml", True),
         ("VDA repo", service / "third_party" / "Video-Depth-Anything", True),
+        ("vendored autoshot splitter", APP_ROOT / "vendored" / "autoshot" / "autoshot_splitter.py", True),
         ("output root", Path(os.environ.get("M2SVID_OUTPUT_ROOT", default_output)), False),
     ]
+    missing_required = 0
     for label, path, required in checks:
         print(status(label, path, required=required))
-    return 0
+        if required and not path.exists():
+            missing_required += 1
+    for label, name in [("ffmpeg", "ffmpeg"), ("ffprobe", "ffprobe")]:
+        line, ok = bin_status(label, name)
+        print(line)
+        if not ok:
+            missing_required += 1
+    return 1 if missing_required else 0
 
 
 if __name__ == "__main__":

@@ -37,8 +37,9 @@ APP_PYTHON="${APP_PYTHON:-${M2SVID_SERVICE_ROOT}/.venv/bin/python}"
 mkdir -p "${M2SVID_OUTPUT_ROOT}"
 
 if [[ ! -x "${APP_PYTHON}" ]]; then
-  echo "[entrypoint] ${APP_PYTHON} not found; falling back to python3"
-  APP_PYTHON="$(command -v python3)"
+  echo "[entrypoint] ${APP_PYTHON} not found." >&2
+  echo "  Run bash scripts/runpod_prepare_env.sh first, or set APP_PYTHON explicitly." >&2
+  exit 3
 fi
 
 cd "${APP_DIR}"
