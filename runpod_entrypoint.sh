@@ -7,6 +7,12 @@ export GRADIO_SERVER_NAME="${GRADIO_SERVER_NAME:-0.0.0.0}"
 export PORT="${PORT:-${GRADIO_SERVER_PORT:-7864}}"
 export GRADIO_CONCURRENCY="${GRADIO_CONCURRENCY:-1}"
 
+# Force cache dirs to volume so Pod restart does not lose HF model weights.
+export HF_HOME="${HF_HOME:-/workspace/.cache/huggingface}"
+export TORCH_HOME="${TORCH_HOME:-/workspace/.cache/torch}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/workspace/.cache}"
+mkdir -p "${HF_HOME}" "${TORCH_HOME}"
+
 # Auth guard. Reject default placeholder; require explicit override on public Pods.
 if [[ "${GRADIO_AUTH:-}" == "" || "${GRADIO_AUTH:-}" == "user:change-me" ]]; then
   if [[ "${ALLOW_NO_AUTH:-0}" != "1" ]]; then

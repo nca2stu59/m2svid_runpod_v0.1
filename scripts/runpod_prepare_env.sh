@@ -36,12 +36,38 @@ SKIP_CKPTS="${SKIP_CKPTS:-0}"
 SKIP_THIRD_PARTY="${SKIP_THIRD_PARTY:-0}"
 
 SHIM_SRC="${SCRIPT_DIR}/blackwell_xformers_shim.py"
+STUB_SRC="${SCRIPT_DIR}/install_xformers_stub.sh"
+FA2_PATCH_SRC="${SCRIPT_DIR}/fa2_unet_patch.py"
+AUTOSHOT_VENDORED_SPLITTER="${APP_DIR}/vendored/autoshot/autoshot_splitter.py"
+
+INSTALL_FA2="${INSTALL_FA2:-auto}"   # auto = install if /opt/wheels/flash_attn-*.whl present
+
+# Cache dirs forced to volume — survive Pod restart (container disk wipes).
+export HF_HOME="${HF_HOME:-/workspace/.cache/huggingface}"
+export TORCH_HOME="${TORCH_HOME:-/workspace/.cache/torch}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/workspace/.cache}"
 
 log() { printf '\033[1;36m[prepare_env]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*"; }
 err() { printf '\033[1;31m[err]\033[0m %s\n' "$*" >&2; }
 
-mkdir -p "${SERVICE_ROOT}" /workspace/outputs
+mkdir -p "${SERVICE_ROOT}" /workspace/outputs "${HF_HOME}" "${TORCH_HOME}"
+
+# ---- step 0: apt deps (defense in depth — Docker image bakes these but
+#              Pod restart may resurrect from a stale layer; re-install is
+#              a no-op when already current).
+log "=== step 0: apt deps (ffmpeg/tmux/rsync/ffprobe/build-essential) ==="
+if ! command -v ffprobe >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
+  apt-get update >/dev/null 2>&1 || true
+  apt-get install -y --no-install-recommends \
+    ffmpeg tmux rsync curl git ca-certificates \
+    build-essential cmake ninja-build \
+    libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 >/dev/null 2>&1 || \
+    warn "apt-get install partial fail (offline env?)"
+fi
+for bin in ffmpeg ffprobe tmux rsync; do
+  command -v "$bin" >/dev/null 2>&1 || warn "missing: $bin (likely Pod with no internet apt)"
+done
 
 # ---- step 1+2: venvs + requirements ----------------------------------------
 create_env() {
@@ -241,6 +267,76 @@ else
   log "SDPA shim deploy disabled (INSTALL_BLACKWELL_SHIM=0)"
 fi
 
+# ---- step 5.5: xformers stub (auto when broken xformers detected) ----------
+# 2026-06-04 attempt #1 lesson: shim path requires xformers.ops to *import*,
+# which fails when the prebuilt wheel ABI breaks (cu130 cp310 wheel on
+# cu128 cp311 env). Stub replaces the package wholesale.
+if [[ -x "${SERVICE_ROOT}/.venv/bin/python" ]] && [[ -x "${STUB_SRC}" ]] || [[ -f "${STUB_SRC}" ]]; then
+  if "${SERVICE_ROOT}/.venv/bin/python" -c "import xformers" 2>/dev/null; then
+    log "=== step 5.5: xformers import OK, stub not needed ==="
+  else
+    log "=== step 5.5: xformers broken — install stub package ==="
+    bash "${STUB_SRC}" || warn "stub install failed (continue, may still work via SDPA)"
+  fi
+fi
+
+# ---- step 5.7: autoshot symlink (vendored splitter -> hardcoded path) ------
+# autoshot_worker.py uses PORT_ROOT/GenStereoBackend/dependency/autoshot/{ckpt,splitter.py}
+if [[ -f "${AUTOSHOT_VENDORED_SPLITTER}" ]]; then
+  log "=== step 5.7: autoshot vendored splitter symlink ==="
+  mkdir -p /workspace/GenStereoBackend/dependency/autoshot
+  ln -sf "${AUTOSHOT_VENDORED_SPLITTER}" \
+    /workspace/GenStereoBackend/dependency/autoshot/autoshot_splitter.py
+  if [[ -f /workspace/m2svid_service/ckpts/autoshot.pth ]]; then
+    ln -sf /workspace/m2svid_service/ckpts/autoshot.pth \
+      /workspace/GenStereoBackend/dependency/autoshot/ckpt_0_200_0.pth 2>/dev/null || true
+  fi
+  log "  symlink OK -> /workspace/GenStereoBackend/dependency/autoshot/"
+fi
+
+# ---- step 5.8: Phase 1 flash-attn 2 wheel + UNet attention patch -----------
+# FA2 wheel built in Docker fa2-builder stage, dropped at /opt/wheels/.
+# Skip silently if no wheel (phase0 image) or INSTALL_FA2=0.
+fa2_install_into_venv() {
+  local venv_dir="$1"
+  local py="${venv_dir}/bin/python"
+  [[ ! -x "${py}" ]] && return
+  local wheel
+  wheel="$(ls /opt/wheels/flash_attn-*.whl 2>/dev/null | head -1)"
+  if [[ -z "${wheel}" ]]; then
+    return
+  fi
+  if "${py}" -c "import flash_attn" 2>/dev/null; then
+    return  # already installed
+  fi
+  log "  install FA2 wheel: $(basename "${wheel}") -> ${venv_dir}"
+  "${py}" -m pip install --no-deps "${wheel}" >/dev/null 2>&1 || \
+    warn "FA2 install fail for ${venv_dir}"
+}
+
+fa2_deploy_patch_to_venv() {
+  local venv_dir="$1"
+  local py="${venv_dir}/bin/python"
+  [[ ! -x "${py}" ]] && return
+  [[ ! -f "${FA2_PATCH_SRC}" ]] && return
+  local site
+  site="$(${py} -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null || echo "")"
+  [[ -z "${site}" || ! -d "${site}" ]] && return
+  cp "${FA2_PATCH_SRC}" "${site}/fa2_unet_patch.py"
+  printf 'import fa2_unet_patch\n' > "${site}/_fa2_unet_patch.pth"
+  log "  FA2 patch deployed -> ${site}"
+}
+
+if [[ "${INSTALL_FA2}" != "0" ]] && ls /opt/wheels/flash_attn-*.whl >/dev/null 2>&1; then
+  log "=== step 5.8: Phase 1 — FA2 install + UNet attention patch ==="
+  fa2_install_into_venv "${SERVICE_ROOT}/.venv"
+  fa2_install_into_venv "${SERVICE_ROOT}/.venv-vda"
+  fa2_deploy_patch_to_venv "${SERVICE_ROOT}/.venv"
+  fa2_deploy_patch_to_venv "${SERVICE_ROOT}/.venv-vda"
+else
+  log "FA2 wheel not present (Phase 0 image) — skipping Phase 1 install"
+fi
+
 # ---- step 6: verify ---------------------------------------------------------
 log "=== step 6: verify ==="
 "${SERVICE_ROOT}/.venv/bin/python" - <<'PY'
@@ -268,9 +364,26 @@ if [[ -x "${SERVICE_ROOT}/.venv/bin/python" ]]; then
     "${SERVICE_ROOT}/.venv/bin/python" "${APP_DIR}/scripts/check_runpod_paths.py" || true
 fi
 
+# ---- step 6.5: transnetv2 + AutoShot warm (pre-download HF weights) --------
+# autoshot worker's 15s import timeout fires on cold cache. Pre-fetch the
+# model weights into volume-backed HF cache so subsequent imports are fast.
+log "=== step 6.5: transnetv2 + autoshot warm (~1-3 min on cold cache) ==="
+"${SERVICE_ROOT}/.venv/bin/python" - <<'PY' 2>&1 || true
+import os, sys
+os.environ.setdefault("HF_HOME", "/workspace/.cache/huggingface")
+os.environ.setdefault("TORCH_HOME", "/workspace/.cache/torch")
+try:
+    from transnetv2_pytorch import TransNetV2
+    m = TransNetV2()
+    print("  transnetv2_pytorch: model loaded OK")
+except Exception as e:
+    print(f"  transnetv2_pytorch warm failed: {e}", file=sys.stderr)
+PY
+
 log "done"
 log "  app python:    ${SERVICE_ROOT}/.venv/bin/python"
 log "  vda python:    ${SERVICE_ROOT}/.venv-vda/bin/python"
 log "  service root:  ${SERVICE_ROOT}"
+log "  cache (HF/torch): ${HF_HOME}"
 log "  Blackwell shim active: ${SHIM_ACTIVE}"
 log "next: ./runpod_entrypoint.sh"
