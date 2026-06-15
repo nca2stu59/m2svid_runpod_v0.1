@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import time
@@ -170,7 +171,7 @@ def _scan_output_runs(root: str | Path) -> list[Path]:
 
     runs = []
     for d in base.iterdir():
-        if d.name == "_download_cache" or not d.is_dir():
+        if d.name in {"_download_cache", "_thumbs"} or not d.is_dir():
             continue
         runs.append(d)
     return sorted(runs, key=lambda p: p.stat().st_mtime, reverse=True)
@@ -325,6 +326,335 @@ def delete_output_run(out_root: str | Path, run_path: str | Path | None, confirm
     if removed_cache:
         return f"deleted: {name} ({size}) + cache {_format_bytes(removed_cache)}"
     return f"deleted: {name} ({size})"
+
+
+def _path_modified(path: Path) -> str:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+    except OSError:
+        return ""
+
+
+def _path_size(path: Path) -> str:
+    try:
+        if path.is_dir():
+            return _format_bytes(_dir_size(path))
+        return _format_bytes(path.stat().st_size)
+    except OSError:
+        return "unknown"
+
+
+def _count_dir_items(path: Path) -> str:
+    if not path.is_dir():
+        return ""
+    try:
+        return str(sum(1 for _ in path.iterdir()))
+    except OSError:
+        return "?"
+
+
+def _file_kind(path: Path) -> tuple[str, str]:
+    if path.is_dir():
+        return "dir", "📁"
+    suffix = path.suffix.lower()
+    if suffix in {".mp4", ".mov", ".mkv", ".avi", ".webm"}:
+        return "video", "🎬"
+    if suffix in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
+        return "image", "🖼"
+    if suffix in {".json", ".jsonl", ".log", ".txt", ".md"}:
+        return "text", "📄"
+    if suffix in {".tar", ".gz", ".zip"} or path.name.endswith(".tar.gz"):
+        return "archive", "🗜"
+    return "file", "📄"
+
+
+def _run_status(run: Path) -> str:
+    if list(run.glob("final_sbs*.mp4")):
+        return "final"
+    if (run / "sbs").exists():
+        return "partial"
+    if (run / "logs").exists():
+        return "started"
+    return "folder"
+
+
+def _thumb_root(root: Path) -> Path:
+    thumb = root / "_thumbs"
+    thumb.mkdir(parents=True, exist_ok=True)
+    return thumb
+
+
+def _write_icon_svg(root: Path, kind: str) -> str:
+    thumb = _thumb_root(root)
+    target = thumb / f"icon_{kind}.svg"
+    if target.exists():
+        return str(target)
+
+    shapes = {
+        "dir": (
+            '<path d="M35 78h250a18 18 0 0 1 18 18v130a22 22 0 0 1-22 22H39'
+            'a22 22 0 0 1-22-22V96a18 18 0 0 1 18-18z" fill="#f5b842"/>'
+            '<path d="M24 68a18 18 0 0 1 18-18h64l30 28H24z" fill="#ffd166"/>'
+        ),
+        "video": (
+            '<rect x="32" y="42" width="256" height="176" rx="22" fill="#1f2937"/>'
+            '<polygon points="132,86 132,174 204,130" fill="#fb7185"/>'
+        ),
+        "image": (
+            '<rect x="32" y="42" width="256" height="176" rx="18" fill="#e0f2fe"/>'
+            '<circle cx="226" cy="88" r="22" fill="#38bdf8"/>'
+            '<polygon points="52,205 128,120 178,174 208,142 268,205" fill="#22c55e"/>'
+        ),
+        "archive": (
+            '<rect x="72" y="36" width="176" height="192" rx="18" fill="#f3e8ff"/>'
+            '<rect x="104" y="66" width="112" height="28" rx="8" fill="#a855f7"/>'
+            '<rect x="104" y="116" width="112" height="28" rx="8" fill="#a855f7"/>'
+            '<rect x="104" y="166" width="112" height="28" rx="8" fill="#a855f7"/>'
+        ),
+        "text": (
+            '<path d="M88 30h116l48 48v154a20 20 0 0 1-20 20H88'
+            'a20 20 0 0 1-20-20V50a20 20 0 0 1 20-20z" fill="#f8fafc"/>'
+            '<path d="M204 30v48h48" fill="#e5e7eb"/>'
+            '<rect x="98" y="112" width="124" height="12" rx="6" fill="#64748b"/>'
+            '<rect x="98" y="146" width="100" height="12" rx="6" fill="#64748b"/>'
+            '<rect x="98" y="180" width="116" height="12" rx="6" fill="#64748b"/>'
+        ),
+        "file": (
+            '<path d="M88 30h116l48 48v154a20 20 0 0 1-20 20H88'
+            'a20 20 0 0 1-20-20V50a20 20 0 0 1 20-20z" fill="#eef2ff"/>'
+            '<path d="M204 30v48h48" fill="#c7d2fe"/>'
+        ),
+    }
+    body = shapes.get(kind, shapes["file"])
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 260">'
+        '<rect width="320" height="260" rx="24" fill="#0f172a"/>'
+        f'{body}'
+        '</svg>'
+    )
+    target.write_text(svg, encoding="utf-8")
+    return str(target)
+
+
+def _video_thumb(root: Path, video: Path) -> str | None:
+    try:
+        stat = video.stat()
+    except OSError:
+        return None
+    thumb = _thumb_root(root) / f"{_safe_slug(video.stem)}_{stat.st_mtime_ns}.jpg"
+    if thumb.exists():
+        return str(thumb)
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                "1",
+                "-i",
+                str(video),
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=360:-1",
+                str(thumb),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except Exception:
+        return None
+    return str(thumb) if thumb.exists() else None
+
+
+def _thumbnail_for_path(root: Path, path: Path) -> str:
+    kind, _icon = _file_kind(path)
+    if kind == "image":
+        return str(path)
+    if kind == "video":
+        return _video_thumb(root, path) or _write_icon_svg(root, "video")
+    if path.is_dir():
+        videos = list(path.glob("final_sbs*.mp4"))
+        if not videos and (path / "sbs").exists():
+            videos = sorted((path / "sbs").glob("*.mp4"))
+        if not videos:
+            videos = sorted(path.glob("*.mp4"))
+        if videos:
+            thumb = _video_thumb(root, videos[0])
+            if thumb:
+                return thumb
+        return _write_icon_svg(root, "dir")
+    return _write_icon_svg(root, kind)
+
+
+def _run_table(out_root: str | Path, day: str | None = None) -> tuple[list[list[str]], list[str]]:
+    runs = _scan_output_runs(out_root)
+    if day and day != "All":
+        runs = [d for d in runs if _run_day(d) == day]
+    rows: list[list[str]] = []
+    paths: list[str] = []
+    for run in runs:
+        finals = sorted(run.glob("final_sbs*.mp4"))
+        status = _run_status(run)
+        rows.append([
+            "📁",
+            run.name,
+            status,
+            _path_size(run),
+            _path_modified(run),
+            str(len(finals)),
+            _count_dir_items(run),
+            str(run),
+        ])
+        paths.append(str(run))
+    return rows, paths
+
+
+def _run_gallery(out_root: str | Path, day: str | None = None) -> tuple[list[tuple[str, str]], list[str]]:
+    try:
+        root = _resolve_output_root(out_root)
+    except gr.Error:
+        return [], []
+    rows, paths = _run_table(root, day)
+    items: list[tuple[str, str]] = []
+    for row, path in zip(rows, paths):
+        run = Path(path)
+        caption = f"{row[1]}\n{row[2]} | {row[3]} | {row[4]}"
+        items.append((_thumbnail_for_path(root, run), caption))
+    return items, paths
+
+
+def _run_artifacts(run: Path) -> list[Path]:
+    priority: list[Path] = []
+    priority.extend(sorted(run.glob("final_sbs*.mp4")))
+    for name in ("sbs", "cuts", "logs", "shot_classes", "_normalized_input"):
+        p = run / name
+        if p.exists():
+            priority.append(p)
+
+    seen = {p.resolve() for p in priority}
+    rest = []
+    try:
+        for p in run.iterdir():
+            if p.resolve() not in seen:
+                rest.append(p)
+    except OSError:
+        pass
+    return priority + sorted(rest, key=lambda p: (not p.is_dir(), p.name.lower()))
+
+
+def _artifact_table(out_root: str | Path, run_path: str | Path | None) -> tuple[list[list[str]], list[str]]:
+    try:
+        _root, run = _validate_run_path(out_root, run_path)
+    except gr.Error:
+        return [], []
+    rows: list[list[str]] = []
+    paths: list[str] = []
+    for path in _run_artifacts(run):
+        kind, icon = _file_kind(path)
+        status = "final" if path.name.startswith("final_sbs") else kind
+        rows.append([
+            icon,
+            path.name,
+            kind,
+            _path_size(path),
+            _path_modified(path),
+            status,
+            _count_dir_items(path),
+            str(path),
+        ])
+        paths.append(str(path))
+    return rows, paths
+
+
+def _artifact_gallery(out_root: str | Path, run_path: str | Path | None) -> tuple[list[tuple[str, str]], list[str]]:
+    try:
+        root, _run = _validate_run_path(out_root, run_path)
+    except gr.Error:
+        return [], []
+    rows, paths = _artifact_table(root, run_path)
+    items: list[tuple[str, str]] = []
+    for row, path in zip(rows, paths):
+        caption = f"{row[1]}\n{row[2]} | {row[3]} | {row[4]}"
+        items.append((_thumbnail_for_path(root, Path(path)), caption))
+    return items, paths
+
+
+def _validate_item_path(
+    out_root: str | Path,
+    run_path: str | Path | None,
+    item_path: str | Path | None,
+    *,
+    allow_run: bool = False,
+) -> tuple[Path, Path, Path]:
+    root, run = _validate_run_path(out_root, run_path)
+    if not item_path:
+        raise gr.Error("select an item")
+    item = Path(str(item_path)).expanduser().resolve()
+    if not item.exists():
+        raise gr.Error(f"selected item not found: {item}")
+    if not _is_relative_to(item, run):
+        raise gr.Error("selected item is outside selected run")
+    if not allow_run and item == run:
+        raise gr.Error("use delete selected run for run folder")
+    if item == root or item.name in {"_download_cache", "_thumbs"}:
+        raise gr.Error("refuse to operate on protected output path")
+    return root, run, item
+
+
+def describe_output_item(out_root: str | Path, run_path: str | Path | None, item_path: str | Path | None) -> str:
+    try:
+        _root, run, item = _validate_item_path(out_root, run_path, item_path, allow_run=True)
+    except gr.Error as exc:
+        return str(exc)
+    rel = item.relative_to(run)
+    kind, _icon = _file_kind(item)
+    return (
+        f"{rel}\n"
+        f"type: {kind}\n"
+        f"size: {_path_size(item)}\n"
+        f"modified: {_path_modified(item)}"
+    )
+
+
+def make_selected_item_download(
+    out_root: str | Path,
+    run_path: str | Path | None,
+    item_path: str | Path | None,
+) -> tuple[str, str]:
+    root, run, item = _validate_item_path(out_root, run_path, item_path, allow_run=True)
+    if item.is_file():
+        return str(item), f"ready: {item.name} ({_path_size(item)})"
+
+    cache = root / "_download_cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    rel = item.relative_to(run)
+    stamp = int(item.stat().st_mtime)
+    archive = cache / f"{_safe_slug(run.name)}_{_safe_slug(str(rel))}_{stamp}.tar.gz"
+    if not archive.exists():
+        with tarfile.open(archive, "w:gz", compresslevel=1) as tf:
+            tf.add(item, arcname=f"{run.name}/{rel}", recursive=True)
+    return str(archive), f"ready: {archive.name} ({_path_size(archive)})"
+
+
+def delete_output_item(
+    out_root: str | Path,
+    run_path: str | Path | None,
+    item_path: str | Path | None,
+    confirm: bool,
+) -> str:
+    if not confirm:
+        raise gr.Error("check delete item confirmation first")
+    _root, run, item = _validate_item_path(out_root, run_path, item_path)
+    rel = item.relative_to(run)
+    size = _path_size(item)
+    if item.is_dir():
+        shutil.rmtree(item)
+    else:
+        item.unlink()
+    return f"deleted: {rel} ({size})"
 
 
 # ─── Per-stage output scanners (Tab dropdowns) ────────────────────────── #
@@ -1576,13 +1906,66 @@ def build_ui():
                 out_final = gr.Dropdown(label="final video", choices=[])
                 run_info = gr.Textbox(label="run info", lines=7, interactive=False)
                 preview = gr.Video(label="preview")
+                run_table_paths = gr.State([])
+                run_gallery_paths = gr.State([])
+                item_table_paths = gr.State([])
+                item_gallery_paths = gr.State([])
+                selected_item_path = gr.State(None)
+
+                run_headers = ["", "name", "status", "size", "modified", "finals", "items", "path"]
+                item_headers = ["", "name", "type", "size", "modified", "status", "items", "path"]
+                with gr.Tabs():
+                    with gr.TabItem("Runs"):
+                        run_table = gr.Dataframe(
+                            label="runs",
+                            headers=run_headers,
+                            datatype=["str"] * len(run_headers),
+                            type="array",
+                            interactive=False,
+                            wrap=True,
+                            show_search="filter",
+                            max_height=360,
+                        )
+                        run_gallery = gr.Gallery(
+                            label="run gallery",
+                            columns=4,
+                            height=360,
+                            object_fit="cover",
+                            type="filepath",
+                        )
+                    with gr.TabItem("Files"):
+                        item_table = gr.Dataframe(
+                            label="files",
+                            headers=item_headers,
+                            datatype=["str"] * len(item_headers),
+                            type="array",
+                            interactive=False,
+                            wrap=True,
+                            show_search="filter",
+                            max_height=360,
+                        )
+                        item_gallery = gr.Gallery(
+                            label="file gallery",
+                            columns=4,
+                            height=360,
+                            object_fit="cover",
+                            type="filepath",
+                        )
+                        selected_item_info = gr.Textbox(
+                            label="selected item",
+                            lines=5,
+                            interactive=False,
+                        )
                 with gr.Row():
                     download_final_btn = gr.Button("final mp4")
                     download_logs_btn = gr.Button("logs tar.gz")
                     download_sbs_btn = gr.Button("sbs tar.gz")
                     download_cuts_btn = gr.Button("cuts tar.gz")
                     download_run_btn = gr.Button("full run tar.gz")
+                    download_item_btn = gr.Button("selected item")
                 with gr.Row():
+                    delete_item_confirm = gr.Checkbox(label="confirm delete selected item", value=False)
+                    delete_item_btn = gr.Button("delete selected item", variant="stop")
                     delete_confirm = gr.Checkbox(label="confirm delete selected run", value=False)
                     delete_run_btn = gr.Button("delete selected run", variant="stop")
                 download_file = gr.File(label="download")
@@ -1591,72 +1974,154 @@ def build_ui():
                 def _set_output_root(root):
                     return root or DEFAULT_OUT_ROOT
 
-                def _refresh_outputs(root):
+                def _output_payload(root, day=None, run_path=None, status=""):
                     days = list_output_days(root)
-                    day = days[0] if days else None
-                    runs = list_output_runs(root, day)
-                    run_value = runs[0][1] if runs else None
+                    day_value = day if day in days else (days[0] if days else None)
+                    runs = list_output_runs(root, day_value)
+                    run_values = {v for _label, v in runs}
+                    run_value = str(run_path) if run_path and str(run_path) in run_values else None
+                    if run_value is None:
+                        run_value = runs[0][1] if runs else None
                     finals = list_run_finals(run_value)
                     final_value = finals[0][1] if finals else None
                     info = describe_output_run(root, run_value) if run_value else "no output runs"
+                    run_rows, run_paths = _run_table(root, day_value)
+                    run_cards, run_card_paths = _run_gallery(root, day_value)
+                    item_rows, item_paths = _artifact_table(root, run_value)
+                    item_cards, item_card_paths = _artifact_gallery(root, run_value)
                     return (
-                        gr.Dropdown(choices=days, value=day),
-                        gr.Dropdown(choices=runs, value=run_value),
-                        gr.Dropdown(choices=finals, value=final_value),
-                        info,
-                        final_value,
-                        None,
-                        "",
-                    )
-
-                def _select_output_day(root, day):
-                    runs = list_output_runs(root, day)
-                    run_value = runs[0][1] if runs else None
-                    finals = list_run_finals(run_value)
-                    final_value = finals[0][1] if finals else None
-                    info = describe_output_run(root, run_value) if run_value else "no output runs"
-                    return (
-                        gr.Dropdown(choices=runs, value=run_value),
-                        gr.Dropdown(choices=finals, value=final_value),
-                        info,
-                        final_value,
-                        None,
-                        "",
-                    )
-
-                def _select_output_run(root, run_path):
-                    finals = list_run_finals(run_path)
-                    final_value = finals[0][1] if finals else None
-                    return (
-                        gr.Dropdown(choices=finals, value=final_value),
-                        describe_output_run(root, run_path),
-                        final_value,
-                        None,
-                        "",
-                    )
-
-                def _preview_output_final(path):
-                    return path
-
-                def _delete_selected_output_run(root, run_path, confirm):
-                    status = delete_output_run(root, run_path, confirm)
-                    days = list_output_days(root)
-                    day = days[0] if days else None
-                    runs = list_output_runs(root, day)
-                    run_value = runs[0][1] if runs else None
-                    finals = list_run_finals(run_value)
-                    final_value = finals[0][1] if finals else None
-                    info = describe_output_run(root, run_value) if run_value else "no output runs"
-                    return (
-                        gr.Dropdown(choices=days, value=day),
+                        gr.Dropdown(choices=days, value=day_value),
                         gr.Dropdown(choices=runs, value=run_value),
                         gr.Dropdown(choices=finals, value=final_value),
                         info,
                         final_value,
                         None,
                         status,
+                        run_rows,
+                        run_paths,
+                        run_cards,
+                        run_card_paths,
+                        item_rows,
+                        item_paths,
+                        item_cards,
+                        item_card_paths,
+                        None,
+                        "",
                         False,
                     )
+
+                def _refresh_outputs(root):
+                    return _output_payload(root)
+
+                def _select_output_day(root, day):
+                    payload = _output_payload(root, day)
+                    return payload[1:]
+
+                def _select_output_run(root, run_path):
+                    finals = list_run_finals(run_path)
+                    final_value = finals[0][1] if finals else None
+                    item_rows, item_paths = _artifact_table(root, run_path)
+                    item_cards, item_card_paths = _artifact_gallery(root, run_path)
+                    return (
+                        gr.Dropdown(choices=finals, value=final_value),
+                        describe_output_run(root, run_path),
+                        final_value,
+                        None,
+                        "",
+                        item_rows,
+                        item_paths,
+                        item_cards,
+                        item_card_paths,
+                        None,
+                        "",
+                        False,
+                    )
+
+                def _preview_output_final(path):
+                    return path
+
+                def _selected_index(paths, evt):
+                    if not paths:
+                        raise gr.Error("no selectable item")
+                    idx = evt.index
+                    if isinstance(idx, (list, tuple)):
+                        idx = idx[0]
+                    if idx is None or int(idx) < 0 or int(idx) >= len(paths):
+                        raise gr.Error("selection out of range")
+                    return paths[int(idx)]
+
+                def _select_run_from_explorer(root, day, paths, evt: gr.SelectData):
+                    run_path = _selected_index(paths, evt)
+                    finals = list_run_finals(run_path)
+                    final_value = finals[0][1] if finals else None
+                    item_rows, item_paths = _artifact_table(root, run_path)
+                    item_cards, item_card_paths = _artifact_gallery(root, run_path)
+                    runs = list_output_runs(root, day)
+                    return (
+                        gr.Dropdown(choices=runs, value=run_path),
+                        gr.Dropdown(choices=finals, value=final_value),
+                        describe_output_run(root, run_path),
+                        final_value,
+                        None,
+                        "",
+                        item_rows,
+                        item_paths,
+                        item_cards,
+                        item_card_paths,
+                        None,
+                        "",
+                        False,
+                    )
+
+                def _preview_for_item(path):
+                    if not path:
+                        return None
+                    p = Path(str(path))
+                    kind, _icon = _file_kind(p)
+                    if kind == "video":
+                        return str(p)
+                    if p.is_dir():
+                        finals = sorted(p.glob("final_sbs*.mp4")) or sorted(p.glob("*.mp4"))
+                        if not finals and (p / "sbs").exists():
+                            finals = sorted((p / "sbs").glob("*.mp4"))
+                        return str(finals[0]) if finals else None
+                    return None
+
+                def _select_item_from_explorer(root, run_path, paths, evt: gr.SelectData):
+                    item_path = _selected_index(paths, evt)
+                    return (
+                        item_path,
+                        describe_output_item(root, run_path, item_path),
+                        _preview_for_item(item_path),
+                        None,
+                        "",
+                    )
+
+                def _delete_selected_item(root, run_path, item_path, confirm):
+                    status = delete_output_item(root, run_path, item_path, confirm)
+                    finals = list_run_finals(run_path)
+                    final_value = finals[0][1] if finals else None
+                    item_rows, item_paths = _artifact_table(root, run_path)
+                    item_cards, item_card_paths = _artifact_gallery(root, run_path)
+                    return (
+                        gr.Dropdown(choices=finals, value=final_value),
+                        describe_output_run(root, run_path),
+                        final_value,
+                        None,
+                        status,
+                        item_rows,
+                        item_paths,
+                        item_cards,
+                        item_card_paths,
+                        None,
+                        "",
+                        False,
+                    )
+
+                def _delete_selected_output_run(root, run_path, confirm):
+                    status = delete_output_run(root, run_path, confirm)
+                    payload = _output_payload(root, status=status)
+                    return (*payload, False)
 
                 root_change = out_root_preset.change(
                     _set_output_root,
@@ -1666,24 +2131,74 @@ def build_ui():
                 root_change.then(
                     _refresh_outputs,
                     inputs=[out_root_view],
-                    outputs=[out_day, out_run, out_final, run_info, preview, download_file, download_status],
+                    outputs=[
+                        out_day, out_run, out_final, run_info, preview,
+                        download_file, download_status,
+                        run_table, run_table_paths, run_gallery, run_gallery_paths,
+                        item_table, item_table_paths, item_gallery, item_gallery_paths,
+                        selected_item_path, selected_item_info, delete_item_confirm,
+                    ],
                 )
                 refresh_btn.click(
                     _refresh_outputs,
                     inputs=[out_root_view],
-                    outputs=[out_day, out_run, out_final, run_info, preview, download_file, download_status],
+                    outputs=[
+                        out_day, out_run, out_final, run_info, preview,
+                        download_file, download_status,
+                        run_table, run_table_paths, run_gallery, run_gallery_paths,
+                        item_table, item_table_paths, item_gallery, item_gallery_paths,
+                        selected_item_path, selected_item_info, delete_item_confirm,
+                    ],
                 )
                 out_day.change(
                     _select_output_day,
                     inputs=[out_root_view, out_day],
-                    outputs=[out_run, out_final, run_info, preview, download_file, download_status],
+                    outputs=[
+                        out_run, out_final, run_info, preview,
+                        download_file, download_status,
+                        run_table, run_table_paths, run_gallery, run_gallery_paths,
+                        item_table, item_table_paths, item_gallery, item_gallery_paths,
+                        selected_item_path, selected_item_info, delete_item_confirm,
+                    ],
                 )
                 out_run.change(
                     _select_output_run,
                     inputs=[out_root_view, out_run],
-                    outputs=[out_final, run_info, preview, download_file, download_status],
+                    outputs=[
+                        out_final, run_info, preview, download_file, download_status,
+                        item_table, item_table_paths, item_gallery, item_gallery_paths,
+                        selected_item_path, selected_item_info, delete_item_confirm,
+                    ],
                 )
                 out_final.change(_preview_output_final, inputs=[out_final], outputs=[preview])
+                run_table.select(
+                    _select_run_from_explorer,
+                    inputs=[out_root_view, out_day, run_table_paths],
+                    outputs=[
+                        out_run, out_final, run_info, preview, download_file, download_status,
+                        item_table, item_table_paths, item_gallery, item_gallery_paths,
+                        selected_item_path, selected_item_info, delete_item_confirm,
+                    ],
+                )
+                run_gallery.select(
+                    _select_run_from_explorer,
+                    inputs=[out_root_view, out_day, run_gallery_paths],
+                    outputs=[
+                        out_run, out_final, run_info, preview, download_file, download_status,
+                        item_table, item_table_paths, item_gallery, item_gallery_paths,
+                        selected_item_path, selected_item_info, delete_item_confirm,
+                    ],
+                )
+                item_table.select(
+                    _select_item_from_explorer,
+                    inputs=[out_root_view, out_run, item_table_paths],
+                    outputs=[selected_item_path, selected_item_info, preview, download_file, download_status],
+                )
+                item_gallery.select(
+                    _select_item_from_explorer,
+                    inputs=[out_root_view, out_run, item_gallery_paths],
+                    outputs=[selected_item_path, selected_item_info, preview, download_file, download_status],
+                )
                 download_final_btn.click(
                     selected_final_download,
                     inputs=[out_root_view, out_run, out_final],
@@ -1709,6 +2224,20 @@ def build_ui():
                     inputs=[out_root_view, out_run],
                     outputs=[download_file, download_status],
                 )
+                download_item_btn.click(
+                    make_selected_item_download,
+                    inputs=[out_root_view, out_run, selected_item_path],
+                    outputs=[download_file, download_status],
+                )
+                delete_item_btn.click(
+                    _delete_selected_item,
+                    inputs=[out_root_view, out_run, selected_item_path, delete_item_confirm],
+                    outputs=[
+                        out_final, run_info, preview, download_file, download_status,
+                        item_table, item_table_paths, item_gallery, item_gallery_paths,
+                        selected_item_path, selected_item_info, delete_item_confirm,
+                    ],
+                )
                 delete_run_btn.click(
                     _delete_selected_output_run,
                     inputs=[out_root_view, out_run, delete_confirm],
@@ -1720,6 +2249,17 @@ def build_ui():
                         preview,
                         download_file,
                         download_status,
+                        run_table,
+                        run_table_paths,
+                        run_gallery,
+                        run_gallery_paths,
+                        item_table,
+                        item_table_paths,
+                        item_gallery,
+                        item_gallery_paths,
+                        selected_item_path,
+                        selected_item_info,
+                        delete_item_confirm,
                         delete_confirm,
                     ],
                 )
