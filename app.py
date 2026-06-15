@@ -23,8 +23,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import sys
+import tarfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 import gradio as gr
@@ -92,6 +96,235 @@ def list_outputs(out_root: str | Path) -> list[tuple[str, str]]:
                 label = f"{d.name}/{final.name} ({size_mb:.1f} MB)"
                 out.append((label, str(final)))
     return out
+
+
+def _format_bytes(n_bytes: int) -> str:
+    value = float(n_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{value:.1f} TB"
+
+
+def _dir_size(path: Path) -> int:
+    total = 0
+    try:
+        for p in path.rglob("*"):
+            if p.is_file():
+                try:
+                    total += p.stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+def _safe_slug(name: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._")
+    return slug[:96] or "output"
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_output_root(root: str | Path) -> Path:
+    p = Path(str(root or DEFAULT_OUT_ROOT)).expanduser().resolve()
+    if not p.exists() or not p.is_dir():
+        raise gr.Error(f"output root not found: {p}")
+    return p
+
+
+def _output_root_presets() -> list[tuple[str, str]]:
+    candidates: list[Path] = [Path(DEFAULT_OUT_ROOT), HERE / "outputs"]
+    if os.name != "nt":
+        candidates.extend([
+            Path("/workspace/m2svid_runpod_v0.1/outputs"),
+            Path("/workspace/outputs/m2svid_runpod_v0.1"),
+        ])
+
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw in candidates:
+        p = raw.expanduser()
+        key = str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        status = "ok" if p.exists() else "missing"
+        out.append((f"{key} [{status}]", key))
+    return out
+
+
+def _scan_output_runs(root: str | Path) -> list[Path]:
+    try:
+        base = _resolve_output_root(root)
+    except gr.Error:
+        return []
+
+    runs = []
+    for d in base.iterdir():
+        if d.name == "_download_cache" or not d.is_dir():
+            continue
+        runs.append(d)
+    return sorted(runs, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def _run_day(run_dir: Path) -> str:
+    return datetime.fromtimestamp(run_dir.stat().st_mtime).strftime("%Y-%m-%d")
+
+
+def list_output_days(out_root: str | Path) -> list[str]:
+    days = sorted({_run_day(d) for d in _scan_output_runs(out_root)}, reverse=True)
+    return ["All"] + days if days else []
+
+
+def list_output_runs(out_root: str | Path, day: str | None = None) -> list[tuple[str, str]]:
+    runs = _scan_output_runs(out_root)
+    if day and day != "All":
+        runs = [d for d in runs if _run_day(d) == day]
+
+    out = []
+    for d in runs:
+        finals = sorted(d.glob("final_sbs*.mp4"))
+        marker = "final" if finals else "partial"
+        label = (
+            f"{_run_day(d)} {datetime.fromtimestamp(d.stat().st_mtime).strftime('%H:%M')} "
+            f"| {marker} | {_format_bytes(_dir_size(d))} | {d.name}"
+        )
+        out.append((label, str(d)))
+    return out
+
+
+def list_run_finals(run_path: str | Path | None) -> list[tuple[str, str]]:
+    if not run_path:
+        return []
+    run = Path(str(run_path)).resolve()
+    if not run.exists() or not run.is_dir():
+        return []
+
+    out = []
+    for f in sorted(run.glob("final_sbs*.mp4")):
+        try:
+            size = _format_bytes(f.stat().st_size)
+        except OSError:
+            size = "unknown"
+        out.append((f"{f.name} ({size})", str(f)))
+    return out
+
+
+def _validate_run_path(out_root: str | Path, run_path: str | Path | None) -> tuple[Path, Path]:
+    root = _resolve_output_root(out_root)
+    if not run_path:
+        raise gr.Error("select a run folder")
+
+    run = Path(str(run_path)).expanduser().resolve()
+    if not run.exists() or not run.is_dir():
+        raise gr.Error(f"run folder not found: {run}")
+    if not _is_relative_to(run, root):
+        raise gr.Error("run folder is outside output root")
+    return root, run
+
+
+def _validate_file_under_run(
+    out_root: str | Path,
+    run_path: str | Path | None,
+    file_path: str | Path | None,
+) -> Path:
+    _root, run = _validate_run_path(out_root, run_path)
+    if not file_path:
+        raise gr.Error("select a file")
+
+    p = Path(str(file_path)).expanduser().resolve()
+    if not p.exists() or not p.is_file():
+        raise gr.Error(f"file not found: {p}")
+    if not _is_relative_to(p, run):
+        raise gr.Error("file is outside selected run folder")
+    return p
+
+
+def describe_output_run(out_root: str | Path, run_path: str | Path | None) -> str:
+    try:
+        _root, run = _validate_run_path(out_root, run_path)
+    except gr.Error as exc:
+        return str(exc)
+
+    parts = []
+    for name in ("final_sbs.mp4", "cuts", "sbs", "logs", "shot_classes"):
+        p = run / name
+        if p.exists():
+            if p.is_file():
+                parts.append(f"{name}: {_format_bytes(p.stat().st_size)}")
+            else:
+                parts.append(f"{name}/: {_format_bytes(_dir_size(p))}")
+    if not parts:
+        parts.append("no known output artifacts")
+    return f"{run.name}\n" + "\n".join(parts)
+
+
+def make_output_archive(out_root: str | Path, run_path: str | Path | None, kind: str) -> tuple[str, str]:
+    root, run = _validate_run_path(out_root, run_path)
+    sources = {
+        "full_run": run,
+        "logs": run / "logs",
+        "sbs": run / "sbs",
+        "cuts": run / "cuts",
+    }
+    source = sources.get(kind)
+    if source is None:
+        raise gr.Error(f"unknown archive kind: {kind}")
+    if not source.exists():
+        raise gr.Error(f"{kind} not found for selected run")
+
+    cache = root / "_download_cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    stamp = int(run.stat().st_mtime)
+    archive = cache / f"{_safe_slug(run.name)}_{kind}_{stamp}.tar.gz"
+    if not archive.exists():
+        arcname = run.name if kind == "full_run" else f"{run.name}/{source.name}"
+        with tarfile.open(archive, "w:gz", compresslevel=1) as tf:
+            tf.add(source, arcname=arcname, recursive=True)
+    return str(archive), f"ready: {archive.name} ({_format_bytes(archive.stat().st_size)})"
+
+
+def selected_final_download(
+    out_root: str | Path,
+    run_path: str | Path | None,
+    final_path: str | Path | None,
+) -> tuple[str, str]:
+    p = _validate_file_under_run(out_root, run_path, final_path)
+    return str(p), f"ready: {p.name} ({_format_bytes(p.stat().st_size)})"
+
+
+def delete_output_run(out_root: str | Path, run_path: str | Path | None, confirm: bool) -> str:
+    root, run = _validate_run_path(out_root, run_path)
+    if not confirm:
+        raise gr.Error("check delete confirmation first")
+    if run == root or run.parent != root or run.name == "_download_cache":
+        raise gr.Error("refuse to delete non-run output path")
+
+    size = _format_bytes(_dir_size(run))
+    name = run.name
+    removed_cache = 0
+    cache = root / "_download_cache"
+    if cache.exists():
+        for p in cache.glob(f"{_safe_slug(name)}_*.tar.gz"):
+            if p.is_file():
+                try:
+                    removed_cache += p.stat().st_size
+                    p.unlink()
+                except OSError:
+                    pass
+    shutil.rmtree(run)
+    if removed_cache:
+        return f"deleted: {name} ({size}) + cache {_format_bytes(removed_cache)}"
+    return f"deleted: {name} ({size})"
 
 
 # ─── Per-stage output scanners (Tab dropdowns) ────────────────────────── #
@@ -1327,21 +1560,169 @@ def build_ui():
 
             # Tab 2: Outputs
             with gr.TabItem("📂 Outputs"):
-                gr.Markdown("최근 실행 결과 — 각 항목 클릭 시 final_sbs.mp4 로드")
-                out_root_view = gr.Textbox(label="root", value=str(HERE / "outputs"))
-                out_list = gr.Dropdown(label="실행 기록", choices=[])
-                refresh_btn = gr.Button("🔄 새로고침")
+                gr.Markdown("최근 실행 결과")
+                root_choices = _output_root_presets()
+                root_value = root_choices[0][1] if root_choices else DEFAULT_OUT_ROOT
+                out_root_preset = gr.Dropdown(
+                    label="root preset",
+                    choices=root_choices,
+                    value=root_value,
+                )
+                out_root_view = gr.Textbox(label="root", value=root_value)
+                with gr.Row():
+                    out_day = gr.Dropdown(label="date", choices=[])
+                    refresh_btn = gr.Button("🔄 새로고침")
+                out_run = gr.Dropdown(label="run folder", choices=[])
+                out_final = gr.Dropdown(label="final video", choices=[])
+                run_info = gr.Textbox(label="run info", lines=7, interactive=False)
                 preview = gr.Video(label="preview")
+                with gr.Row():
+                    download_final_btn = gr.Button("final mp4")
+                    download_logs_btn = gr.Button("logs tar.gz")
+                    download_sbs_btn = gr.Button("sbs tar.gz")
+                    download_cuts_btn = gr.Button("cuts tar.gz")
+                    download_run_btn = gr.Button("full run tar.gz")
+                with gr.Row():
+                    delete_confirm = gr.Checkbox(label="confirm delete selected run", value=False)
+                    delete_run_btn = gr.Button("delete selected run", variant="stop")
+                download_file = gr.File(label="download")
+                download_status = gr.Textbox(label="download status", interactive=False)
 
-                def _refresh(root):
-                    items = list_outputs(root)
-                    return gr.Dropdown(choices=items, value=(items[0][1] if items else None))
+                def _set_output_root(root):
+                    return root or DEFAULT_OUT_ROOT
 
-                def _preview(path):
+                def _refresh_outputs(root):
+                    days = list_output_days(root)
+                    day = days[0] if days else None
+                    runs = list_output_runs(root, day)
+                    run_value = runs[0][1] if runs else None
+                    finals = list_run_finals(run_value)
+                    final_value = finals[0][1] if finals else None
+                    info = describe_output_run(root, run_value) if run_value else "no output runs"
+                    return (
+                        gr.Dropdown(choices=days, value=day),
+                        gr.Dropdown(choices=runs, value=run_value),
+                        gr.Dropdown(choices=finals, value=final_value),
+                        info,
+                        final_value,
+                        None,
+                        "",
+                    )
+
+                def _select_output_day(root, day):
+                    runs = list_output_runs(root, day)
+                    run_value = runs[0][1] if runs else None
+                    finals = list_run_finals(run_value)
+                    final_value = finals[0][1] if finals else None
+                    info = describe_output_run(root, run_value) if run_value else "no output runs"
+                    return (
+                        gr.Dropdown(choices=runs, value=run_value),
+                        gr.Dropdown(choices=finals, value=final_value),
+                        info,
+                        final_value,
+                        None,
+                        "",
+                    )
+
+                def _select_output_run(root, run_path):
+                    finals = list_run_finals(run_path)
+                    final_value = finals[0][1] if finals else None
+                    return (
+                        gr.Dropdown(choices=finals, value=final_value),
+                        describe_output_run(root, run_path),
+                        final_value,
+                        None,
+                        "",
+                    )
+
+                def _preview_output_final(path):
                     return path
 
-                refresh_btn.click(_refresh, inputs=[out_root_view], outputs=[out_list])
-                out_list.change(_preview, inputs=[out_list], outputs=[preview])
+                def _delete_selected_output_run(root, run_path, confirm):
+                    status = delete_output_run(root, run_path, confirm)
+                    days = list_output_days(root)
+                    day = days[0] if days else None
+                    runs = list_output_runs(root, day)
+                    run_value = runs[0][1] if runs else None
+                    finals = list_run_finals(run_value)
+                    final_value = finals[0][1] if finals else None
+                    info = describe_output_run(root, run_value) if run_value else "no output runs"
+                    return (
+                        gr.Dropdown(choices=days, value=day),
+                        gr.Dropdown(choices=runs, value=run_value),
+                        gr.Dropdown(choices=finals, value=final_value),
+                        info,
+                        final_value,
+                        None,
+                        status,
+                        False,
+                    )
+
+                root_change = out_root_preset.change(
+                    _set_output_root,
+                    inputs=[out_root_preset],
+                    outputs=[out_root_view],
+                )
+                root_change.then(
+                    _refresh_outputs,
+                    inputs=[out_root_view],
+                    outputs=[out_day, out_run, out_final, run_info, preview, download_file, download_status],
+                )
+                refresh_btn.click(
+                    _refresh_outputs,
+                    inputs=[out_root_view],
+                    outputs=[out_day, out_run, out_final, run_info, preview, download_file, download_status],
+                )
+                out_day.change(
+                    _select_output_day,
+                    inputs=[out_root_view, out_day],
+                    outputs=[out_run, out_final, run_info, preview, download_file, download_status],
+                )
+                out_run.change(
+                    _select_output_run,
+                    inputs=[out_root_view, out_run],
+                    outputs=[out_final, run_info, preview, download_file, download_status],
+                )
+                out_final.change(_preview_output_final, inputs=[out_final], outputs=[preview])
+                download_final_btn.click(
+                    selected_final_download,
+                    inputs=[out_root_view, out_run, out_final],
+                    outputs=[download_file, download_status],
+                )
+                download_logs_btn.click(
+                    lambda root, run: make_output_archive(root, run, "logs"),
+                    inputs=[out_root_view, out_run],
+                    outputs=[download_file, download_status],
+                )
+                download_sbs_btn.click(
+                    lambda root, run: make_output_archive(root, run, "sbs"),
+                    inputs=[out_root_view, out_run],
+                    outputs=[download_file, download_status],
+                )
+                download_cuts_btn.click(
+                    lambda root, run: make_output_archive(root, run, "cuts"),
+                    inputs=[out_root_view, out_run],
+                    outputs=[download_file, download_status],
+                )
+                download_run_btn.click(
+                    lambda root, run: make_output_archive(root, run, "full_run"),
+                    inputs=[out_root_view, out_run],
+                    outputs=[download_file, download_status],
+                )
+                delete_run_btn.click(
+                    _delete_selected_output_run,
+                    inputs=[out_root_view, out_run, delete_confirm],
+                    outputs=[
+                        out_day,
+                        out_run,
+                        out_final,
+                        run_info,
+                        preview,
+                        download_file,
+                        download_status,
+                        delete_confirm,
+                    ],
+                )
 
             # Tab 3: Settings/Environment
             with gr.TabItem("⚙️ Settings"):
@@ -1370,7 +1751,7 @@ def build_ui():
                     "app.py, run_pipeline.py 등) 적용 시 사용.  \n"
                     "재기동 절차:  \n"
                     "1. 아래 [재기동 확인] 체크 → [🔴 강제 재기동] 활성화  \n"
-                    "2. 클릭하면 즉시 종료 + .bat watchdog 가 자동 재시작 (~2초)  \n"
+                    "2. 클릭하면 현재 Python 프로세스를 새 app.py로 재실행 (~2초)  \n"
                     "3. **브라우저는 5.5초 후 자동 새로고침** (수동 F5 불필요)"
                 )
                 reboot_confirm = gr.Checkbox(
@@ -1385,17 +1766,15 @@ def build_ui():
                     return gr.update(interactive=bool(checked))
 
                 def _do_reboot():
-                    """Schedule forced exit (code 42) so .bat watchdog restarts."""
+                    """Restart the app process in-place so container PID stays alive."""
                     import threading
-                    def _kill():
+                    def _restart():
                         time.sleep(0.5)  # let HTTP response flush
-                        # SIGKILL-equivalent — bypass atexit / cleanup so any
-                        # hung subprocess parent is forcibly torn down.
-                        os._exit(42)
-                    threading.Thread(target=_kill, daemon=True,
+                        os.execv(sys.executable, [sys.executable, *sys.argv])
+                    threading.Thread(target=_restart, daemon=True,
                                      name="force-reboot").start()
                     return ("🔄 재기동 중... 5.5초 후 자동 새로고침\n"
-                            "(.bat watchdog 가 exit code 42 감지 후 자동 재시작)")
+                            "(현재 Python 프로세스를 새 app.py로 재실행)")
 
                 reboot_confirm.change(
                     _toggle_reboot_btn,
