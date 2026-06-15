@@ -60,6 +60,12 @@ DEFAULT_OUT_ROOT = str(
         Path("/workspace/outputs/m2svid_runpod_v0.1") if os.name != "nt" else HERE / "outputs"
     ))
 )
+PROTECTED_OUTPUT_DIRS = {"_download_cache", "_thumbs"}
+GALLERY_COLUMNS = 8
+GALLERY_HEIGHT = 180
+THUMB_MAX_WIDTH = 180
+ICON_WIDTH = 160
+ICON_HEIGHT = 130
 
 
 # ──────────────────────────────────────────────
@@ -135,6 +141,16 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
+def _is_protected_output_path(root: Path, path: Path) -> bool:
+    if path == root:
+        return True
+    for name in PROTECTED_OUTPUT_DIRS:
+        protected = root / name
+        if path == protected or _is_relative_to(path, protected):
+            return True
+    return False
+
+
 def _resolve_output_root(root: str | Path) -> Path:
     p = Path(str(root or DEFAULT_OUT_ROOT)).expanduser().resolve()
     if not p.exists() or not p.is_dir():
@@ -171,7 +187,7 @@ def _scan_output_runs(root: str | Path) -> list[Path]:
 
     runs = []
     for d in base.iterdir():
-        if d.name in {"_download_cache", "_thumbs"} or not d.is_dir():
+        if d.name in PROTECTED_OUTPUT_DIRS or not d.is_dir():
             continue
         runs.append(d)
     return sorted(runs, key=lambda p: p.stat().st_mtime, reverse=True)
@@ -307,7 +323,7 @@ def delete_output_run(out_root: str | Path, run_path: str | Path | None, confirm
     root, run = _validate_run_path(out_root, run_path)
     if not confirm:
         raise gr.Error("check delete confirmation first")
-    if run == root or run.parent != root or run.name == "_download_cache":
+    if run.parent != root or _is_protected_output_path(root, run):
         raise gr.Error("refuse to delete non-run output path")
 
     size = _format_bytes(_dir_size(run))
@@ -322,7 +338,10 @@ def delete_output_run(out_root: str | Path, run_path: str | Path | None, confirm
                     p.unlink()
                 except OSError:
                     pass
-    shutil.rmtree(run)
+    try:
+        shutil.rmtree(run)
+    except OSError as exc:
+        raise gr.Error(f"delete failed: {exc}") from exc
     if removed_cache:
         return f"deleted: {name} ({size}) + cache {_format_bytes(removed_cache)}"
     return f"deleted: {name} ({size})"
@@ -351,6 +370,22 @@ def _count_dir_items(path: Path) -> str:
         return str(sum(1 for _ in path.iterdir()))
     except OSError:
         return "?"
+
+
+def _remove_matching_archives(root: Path, patterns: list[str]) -> int:
+    removed_cache = 0
+    cache = root / "_download_cache"
+    if not cache.exists():
+        return removed_cache
+    for pattern in patterns:
+        for p in cache.glob(pattern):
+            if p.is_file():
+                try:
+                    removed_cache += p.stat().st_size
+                    p.unlink()
+                except OSError:
+                    pass
+    return removed_cache
 
 
 def _file_kind(path: Path) -> tuple[str, str]:
@@ -386,7 +421,7 @@ def _thumb_root(root: Path) -> Path:
 
 def _write_icon_svg(root: Path, kind: str) -> str:
     thumb = _thumb_root(root)
-    target = thumb / f"icon_{kind}.svg"
+    target = thumb / f"icon_{kind}_{ICON_WIDTH}x{ICON_HEIGHT}.svg"
     if target.exists():
         return str(target)
 
@@ -427,7 +462,7 @@ def _write_icon_svg(root: Path, kind: str) -> str:
     }
     body = shapes.get(kind, shapes["file"])
     svg = (
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 260">'
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{ICON_WIDTH}" height="{ICON_HEIGHT}" viewBox="0 0 320 260">'
         '<rect width="320" height="260" rx="24" fill="#0f172a"/>'
         f'{body}'
         '</svg>'
@@ -456,7 +491,7 @@ def _video_thumb(root: Path, video: Path) -> str | None:
                 "-frames:v",
                 "1",
                 "-vf",
-                "scale=360:-1",
+                f"scale={THUMB_MAX_WIDTH}:-1",
                 str(thumb),
             ],
             stdout=subprocess.DEVNULL,
@@ -599,7 +634,7 @@ def _validate_item_path(
         raise gr.Error("selected item is outside selected run")
     if not allow_run and item == run:
         raise gr.Error("use delete selected run for run folder")
-    if item == root or item.name in {"_download_cache", "_thumbs"}:
+    if _is_protected_output_path(root, item):
         raise gr.Error("refuse to operate on protected output path")
     return root, run, item
 
@@ -650,10 +685,18 @@ def delete_output_item(
     _root, run, item = _validate_item_path(out_root, run_path, item_path)
     rel = item.relative_to(run)
     size = _path_size(item)
-    if item.is_dir():
-        shutil.rmtree(item)
-    else:
-        item.unlink()
+    archive_pattern = f"{_safe_slug(run.name)}_{_safe_slug(str(rel))}_*.tar.gz"
+    try:
+        if item.is_dir():
+            shutil.rmtree(item)
+        else:
+            item.unlink()
+    except OSError as exc:
+        raise gr.Error(f"delete failed: {exc}") from exc
+
+    removed_cache = _remove_matching_archives(_root, [archive_pattern])
+    if removed_cache:
+        return f"deleted: {rel} ({size}) + cache {_format_bytes(removed_cache)}"
     return f"deleted: {rel} ({size})"
 
 
@@ -1928,8 +1971,8 @@ def build_ui():
                         )
                         run_gallery = gr.Gallery(
                             label="run gallery",
-                            columns=4,
-                            height=360,
+                            columns=GALLERY_COLUMNS,
+                            height=GALLERY_HEIGHT,
                             object_fit="cover",
                             type="filepath",
                         )
@@ -1946,8 +1989,8 @@ def build_ui():
                         )
                         item_gallery = gr.Gallery(
                             label="file gallery",
-                            columns=4,
-                            height=360,
+                            columns=GALLERY_COLUMNS,
+                            height=GALLERY_HEIGHT,
                             object_fit="cover",
                             type="filepath",
                         )
@@ -2008,6 +2051,7 @@ def build_ui():
                         None,
                         "",
                         False,
+                        False,
                     )
 
                 def _refresh_outputs(root):
@@ -2034,6 +2078,7 @@ def build_ui():
                         item_card_paths,
                         None,
                         "",
+                        False,
                         False,
                     )
 
@@ -2071,6 +2116,7 @@ def build_ui():
                         None,
                         "",
                         False,
+                        False,
                     )
 
                 def _preview_for_item(path):
@@ -2095,6 +2141,7 @@ def build_ui():
                         _preview_for_item(item_path),
                         None,
                         "",
+                        False,
                     )
 
                 def _delete_selected_item(root, run_path, item_path, confirm):
@@ -2116,12 +2163,13 @@ def build_ui():
                         None,
                         "",
                         False,
+                        False,
                     )
 
                 def _delete_selected_output_run(root, run_path, confirm):
                     status = delete_output_run(root, run_path, confirm)
                     payload = _output_payload(root, status=status)
-                    return (*payload, False)
+                    return payload
 
                 root_change = out_root_preset.change(
                     _set_output_root,
@@ -2136,7 +2184,7 @@ def build_ui():
                         download_file, download_status,
                         run_table, run_table_paths, run_gallery, run_gallery_paths,
                         item_table, item_table_paths, item_gallery, item_gallery_paths,
-                        selected_item_path, selected_item_info, delete_item_confirm,
+                        selected_item_path, selected_item_info, delete_item_confirm, delete_confirm,
                     ],
                 )
                 refresh_btn.click(
@@ -2147,7 +2195,7 @@ def build_ui():
                         download_file, download_status,
                         run_table, run_table_paths, run_gallery, run_gallery_paths,
                         item_table, item_table_paths, item_gallery, item_gallery_paths,
-                        selected_item_path, selected_item_info, delete_item_confirm,
+                        selected_item_path, selected_item_info, delete_item_confirm, delete_confirm,
                     ],
                 )
                 out_day.change(
@@ -2158,7 +2206,7 @@ def build_ui():
                         download_file, download_status,
                         run_table, run_table_paths, run_gallery, run_gallery_paths,
                         item_table, item_table_paths, item_gallery, item_gallery_paths,
-                        selected_item_path, selected_item_info, delete_item_confirm,
+                        selected_item_path, selected_item_info, delete_item_confirm, delete_confirm,
                     ],
                 )
                 out_run.change(
@@ -2167,7 +2215,7 @@ def build_ui():
                     outputs=[
                         out_final, run_info, preview, download_file, download_status,
                         item_table, item_table_paths, item_gallery, item_gallery_paths,
-                        selected_item_path, selected_item_info, delete_item_confirm,
+                        selected_item_path, selected_item_info, delete_item_confirm, delete_confirm,
                     ],
                 )
                 out_final.change(_preview_output_final, inputs=[out_final], outputs=[preview])
@@ -2177,7 +2225,7 @@ def build_ui():
                     outputs=[
                         out_run, out_final, run_info, preview, download_file, download_status,
                         item_table, item_table_paths, item_gallery, item_gallery_paths,
-                        selected_item_path, selected_item_info, delete_item_confirm,
+                        selected_item_path, selected_item_info, delete_item_confirm, delete_confirm,
                     ],
                 )
                 run_gallery.select(
@@ -2186,18 +2234,18 @@ def build_ui():
                     outputs=[
                         out_run, out_final, run_info, preview, download_file, download_status,
                         item_table, item_table_paths, item_gallery, item_gallery_paths,
-                        selected_item_path, selected_item_info, delete_item_confirm,
+                        selected_item_path, selected_item_info, delete_item_confirm, delete_confirm,
                     ],
                 )
                 item_table.select(
                     _select_item_from_explorer,
                     inputs=[out_root_view, out_run, item_table_paths],
-                    outputs=[selected_item_path, selected_item_info, preview, download_file, download_status],
+                    outputs=[selected_item_path, selected_item_info, preview, download_file, download_status, delete_item_confirm],
                 )
                 item_gallery.select(
                     _select_item_from_explorer,
                     inputs=[out_root_view, out_run, item_gallery_paths],
-                    outputs=[selected_item_path, selected_item_info, preview, download_file, download_status],
+                    outputs=[selected_item_path, selected_item_info, preview, download_file, download_status, delete_item_confirm],
                 )
                 download_final_btn.click(
                     selected_final_download,
@@ -2235,7 +2283,7 @@ def build_ui():
                     outputs=[
                         out_final, run_info, preview, download_file, download_status,
                         item_table, item_table_paths, item_gallery, item_gallery_paths,
-                        selected_item_path, selected_item_info, delete_item_confirm,
+                        selected_item_path, selected_item_info, delete_item_confirm, delete_confirm,
                     ],
                 )
                 delete_run_btn.click(
