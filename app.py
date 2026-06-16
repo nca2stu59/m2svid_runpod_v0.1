@@ -397,8 +397,8 @@ def _stream_run_tar_response(out_root: str, run_path: str, token: str):
     )
 
 
-def register_stream_download_routes(demo):
-    if any(getattr(route, "path", None) == "/stream-run-tar" for route in demo.app.routes):
+def register_stream_download_routes(demo, *, force: bool = False):
+    if not force and any(getattr(route, "path", None) == "/stream-run-tar" for route in demo.app.routes):
         return
 
     @demo.app.get("/stream-run-tar")
@@ -2571,7 +2571,7 @@ def build_ui():
 if __name__ == "__main__":
     demo = build_ui()
     demo.queue(default_concurrency_limit=int(os.environ.get("GRADIO_CONCURRENCY", "1")))
-    register_stream_download_routes(demo)
+    register_stream_download_routes(demo, force=True)
     demo.launch(
         server_name=os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
         server_port=PORT,
