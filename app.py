@@ -22,6 +22,7 @@ Visual theme: GenStereo (gr.themes.Soft + 이모지 + Tab 레이아웃)
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import secrets
@@ -29,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -507,8 +509,15 @@ def _run_status(run: Path) -> str:
 
 def _thumb_root(root: Path) -> Path:
     thumb = root / "_thumbs"
-    thumb.mkdir(parents=True, exist_ok=True)
-    return thumb
+    try:
+        thumb.mkdir(parents=True, exist_ok=True)
+        return thumb
+    except OSError:
+        fallback = Path(tempfile.gettempdir()) / "m2svid_runpod_thumbs" / hashlib.sha1(
+            str(root).encode("utf-8", errors="replace")
+        ).hexdigest()[:12]
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
 
 
 def _write_icon_svg(root: Path, kind: str) -> str:
