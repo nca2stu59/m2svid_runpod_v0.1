@@ -2067,10 +2067,10 @@ def build_ui():
                 )
                 out_root_view = gr.Textbox(label="root", value=root_value)
                 with gr.Row():
-                    out_day = gr.Dropdown(label="date", choices=[])
+                    out_day = gr.Dropdown(label="date", choices=[], allow_custom_value=True)
                     refresh_btn = gr.Button("🔄 새로고침")
-                out_run = gr.Dropdown(label="run folder", choices=[])
-                out_final = gr.Dropdown(label="final video", choices=[])
+                out_run = gr.Dropdown(label="run folder", choices=[], allow_custom_value=True)
+                out_final = gr.Dropdown(label="final video", choices=[], allow_custom_value=True)
                 run_info = gr.Textbox(label="run info", lines=7, interactive=False)
                 preview = gr.Video(label="preview")
                 run_table_paths = gr.State([])
