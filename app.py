@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,7 @@ import tarfile
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlencode
 
 import gradio as gr
 
@@ -66,6 +68,7 @@ GALLERY_HEIGHT = 180
 THUMB_MAX_WIDTH = 180
 ICON_WIDTH = 160
 ICON_HEIGHT = 130
+STREAM_DOWNLOAD_TOKEN = os.environ.get("M2SVID_STREAM_DOWNLOAD_TOKEN") or secrets.token_urlsafe(24)
 
 
 # ──────────────────────────────────────────────
@@ -308,6 +311,95 @@ def make_output_archive(out_root: str | Path, run_path: str | Path | None, kind:
         with tarfile.open(archive, "w:gz", compresslevel=1) as tf:
             tf.add(source, arcname=arcname, recursive=True)
     return str(archive), f"ready: {archive.name} ({_format_bytes(archive.stat().st_size)})"
+
+
+def _stream_run_tar_response(out_root: str, run_path: str, token: str):
+    from fastapi import HTTPException
+    from fastapi.responses import StreamingResponse
+
+    if not secrets.compare_digest(str(token or ""), STREAM_DOWNLOAD_TOKEN):
+        raise HTTPException(status_code=403, detail="invalid download token")
+    try:
+        root, run = _validate_run_path(out_root, run_path)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if run.parent != root or _is_protected_output_path(root, run):
+        raise HTTPException(status_code=400, detail="refuse to stream non-run output path")
+
+    tar_bin = shutil.which("tar")
+    if not tar_bin:
+        raise HTTPException(status_code=500, detail="tar command not found")
+
+    filename = f"{_safe_slug(run.name)}.tar"
+    quoted = urlencode({"filename": filename}).split("=", 1)[1]
+    headers = {
+        "Content-Disposition": (
+            f'attachment; filename="{filename}"; filename*=UTF-8\'\'{quoted}'
+        ),
+        "X-Content-Type-Options": "nosniff",
+    }
+
+    def _iter_tar():
+        proc = subprocess.Popen(
+            [tar_bin, "-C", str(root), "-cf", "-", run.name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=1024 * 1024,
+        )
+        try:
+            assert proc.stdout is not None
+            while True:
+                chunk = proc.stdout.read(1024 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+            stderr = b""
+            if proc.stderr is not None:
+                stderr = proc.stderr.read(64 * 1024)
+            rc = proc.wait()
+            if rc != 0:
+                msg = stderr.decode("utf-8", errors="replace").strip()
+                _term_log(f"stream tar failed rc={rc}: {msg[:400]}")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+
+    _term_log(f"stream tar start: {run}")
+    return StreamingResponse(
+        _iter_tar(),
+        media_type="application/x-tar",
+        headers=headers,
+    )
+
+
+def register_stream_download_routes(demo):
+    @demo.app.get("/stream-run-tar")
+    def stream_run_tar(root: str, run: str, token: str):
+        return _stream_run_tar_response(root, run, token)
+
+
+def make_stream_run_download_link(
+    out_root: str | Path,
+    run_path: str | Path | None,
+) -> tuple[str, str]:
+    root, run = _validate_run_path(out_root, run_path)
+    if run.parent != root or _is_protected_output_path(root, run):
+        raise gr.Error("refuse to stream non-run output path")
+    size = _format_bytes(_dir_size(run))
+    url = "/stream-run-tar?" + urlencode({
+        "root": str(root),
+        "run": str(run),
+        "token": STREAM_DOWNLOAD_TOKEN,
+    })
+    name = f"{_safe_slug(run.name)}.tar"
+    html = (
+        f'<a href="{url}" target="_blank" rel="noopener" '
+        f'download="{name}" style="font-weight:700">'
+        f'Download full run as streaming .tar ({size})</a>'
+        "<br><span>No server-side archive file is created. "
+        "Keep this tab open until the browser download starts.</span>"
+    )
+    return html, f"stream link ready: {run.name} ({size})"
 
 
 def selected_final_download(
@@ -2005,6 +2097,7 @@ def build_ui():
                     download_sbs_btn = gr.Button("sbs tar.gz")
                     download_cuts_btn = gr.Button("cuts tar.gz")
                     download_run_btn = gr.Button("full run tar.gz")
+                    stream_run_btn = gr.Button("stream full run .tar")
                     download_item_btn = gr.Button("selected item")
                 with gr.Row():
                     delete_item_confirm = gr.Checkbox(label="confirm delete selected item", value=False)
@@ -2013,6 +2106,7 @@ def build_ui():
                     delete_run_btn = gr.Button("delete selected run", variant="stop")
                 download_file = gr.File(label="download")
                 download_status = gr.Textbox(label="download status", interactive=False)
+                stream_download_link = gr.HTML("")
 
                 def _set_output_root(root):
                     return root or DEFAULT_OUT_ROOT
@@ -2272,6 +2366,11 @@ def build_ui():
                     inputs=[out_root_view, out_run],
                     outputs=[download_file, download_status],
                 )
+                stream_run_btn.click(
+                    make_stream_run_download_link,
+                    inputs=[out_root_view, out_run],
+                    outputs=[stream_download_link, download_status],
+                )
                 download_item_btn.click(
                     make_selected_item_download,
                     inputs=[out_root_view, out_run, selected_item_path],
@@ -2430,6 +2529,7 @@ def build_ui():
         reset_btn.click(fn=_reset_v17, inputs=[reset_gpu_cb],
                         outputs=[status_pill, status_msg])
 
+    register_stream_download_routes(demo)
     return demo
 
 
