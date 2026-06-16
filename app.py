@@ -93,6 +93,29 @@ def _gradio_auth():
     return (user, password)
 
 
+def _gradio_allowed_paths() -> list[str]:
+    candidates: list[Path] = [
+        Path(DEFAULT_OUT_ROOT),
+        HERE / "outputs",
+        Path(tempfile.gettempdir()) / "m2svid_runpod_thumbs",
+    ]
+    if os.name != "nt":
+        candidates.extend([
+            Path("/workspace/m2svid_runpod_v0.1/outputs"),
+            Path("/workspace/outputs/m2svid_runpod_v0.1"),
+        ])
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in candidates:
+        for path in (raw.expanduser(), raw.expanduser().resolve(strict=False)):
+            key = str(path)
+            if key not in seen:
+                seen.add(key)
+                out.append(key)
+    return out
+
+
 def list_outputs(out_root: str | Path) -> list[tuple[str, str]]:
     root = Path(out_root)
     if not root.exists():
@@ -2550,6 +2573,7 @@ if __name__ == "__main__":
         show_error=True,
         inbrowser=os.environ.get("GRADIO_INBROWSER", "0") == "1",
         auth=_gradio_auth(),
+        allowed_paths=_gradio_allowed_paths(),
         share=False,
         theme=uk.THEME, css=uk.HEADER_CSS,
     )
