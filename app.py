@@ -398,10 +398,11 @@ def _stream_run_tar_response(out_root: str, run_path: str, token: str):
 
 
 def register_stream_download_routes(demo, *, force: bool = False):
-    if not force and any(getattr(route, "path", None) == "/stream-run-tar" for route in demo.app.routes):
+    app = getattr(demo, "app", demo)
+    if not force and any(getattr(route, "path", None) == "/stream-run-tar" for route in app.routes):
         return
 
-    @demo.app.get("/stream-run-tar")
+    @app.get("/stream-run-tar")
     def stream_run_tar(root: str, run: str, token: str):
         return _stream_run_tar_response(root, run, token)
 
@@ -2569,16 +2570,27 @@ def build_ui():
 
 
 if __name__ == "__main__":
+    import uvicorn
+    from fastapi import FastAPI
+
     demo = build_ui()
     demo.queue(default_concurrency_limit=int(os.environ.get("GRADIO_CONCURRENCY", "1")))
-    register_stream_download_routes(demo, force=True)
-    demo.launch(
+    app = FastAPI()
+    register_stream_download_routes(app, force=True)
+    gr.mount_gradio_app(
+        app,
+        demo,
+        path="/",
         server_name=os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
         server_port=PORT,
         show_error=True,
-        inbrowser=os.environ.get("GRADIO_INBROWSER", "0") == "1",
         auth=_gradio_auth(),
         allowed_paths=_gradio_allowed_paths(),
-        share=False,
         theme=uk.THEME, css=uk.HEADER_CSS,
+    )
+    uvicorn.run(
+        app,
+        host=os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
+        port=PORT,
+        log_level=os.environ.get("UVICORN_LOG_LEVEL", "info"),
     )
